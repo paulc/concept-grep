@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+argh = "0.1.17"
 ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = "0.3.0"
