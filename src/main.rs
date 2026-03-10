@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -8,6 +9,9 @@ use tokenizers::Tokenizer;
 
 use argh::FromArgs;
 
+const CHUNK_SIZE: usize = 200; // Max 256 tokens
+const EPSILON: f32 = 1e-9; // Epsilon value to avoid Div0
+
 #[derive(FromArgs)]
 /// CLI Arguments
 struct CliArgs {
@@ -17,6 +21,13 @@ struct CliArgs {
     /// model path
     #[argh(option, default = "String::from(\"models/MiniLM-L6-v2\")")]
     model_path: String,
+    /// context lines
+    #[argh(option, default = "default_context()")]
+    context: usize,
+}
+
+fn default_context() -> usize {
+    1
 }
 
 fn main() -> anyhow::Result<()> {
@@ -27,18 +38,33 @@ fn main() -> anyhow::Result<()> {
     // Set ORT backend API & load model
     ort::set_api(ort_tract::api());
     let mut model = Model::new(model_path)?;
-    model.show_info();
 
     // Get enbedding for search concept
-    let search_v = model.run(&[&args.concept])?.row(0).to_owned();
+    let search_v = model.run(&[args.concept])?.row(0).to_owned();
+
+    let mut line_buf = VecDeque::<String>::new();
 
     // Read from stdin
     let stdin = std::io::stdin().lock();
     let mut lines = stdin.lines();
     while let Some(Ok(line)) = lines.next() {
-        let line_v = model.run(&[&line])?.row(0).to_owned();
-        // Model outputs are already normalised
-        println!(">> {}", cosine_similarity(&search_v, &line_v, false));
+        // Push line into context buffer
+        line_buf.push_back(line.clone());
+        if line_buf.len() > args.context {
+            line_buf.pop_front();
+        }
+        // Run model on chunked context imput
+        let context_v = model.run(&chunk_input(line_buf.make_contiguous()))?;
+        // Collapse embeddings to Array1 (mean of chunks)
+        let merged_v = context_v
+            .mean_axis(Axis(0))
+            .ok_or_else(|| anyhow::anyhow!("mean_axis"))?;
+        // Check similarity (need to normalise as merging will impact magnitide)
+        let similarity = cosine_similarity(&search_v, &merged_v, true);
+        println!("[{:5.3}] {}", similarity, line);
+
+        // let p = ndarray::stack(Axis(0), &[search_v.view(), merged_v.view()])?;
+        // print_array2(&pairwise_similarity(&p, true));
     }
     Ok(())
 }
@@ -69,7 +95,7 @@ impl Model {
             println!("Output: {:?}", outlet);
         }
     }
-    pub fn run(&mut self, inputs: &[&str]) -> anyhow::Result<Array2<f32>> {
+    pub fn run(&mut self, inputs: &[String]) -> anyhow::Result<Array2<f32>> {
         if inputs.is_empty() {
             return Ok(Array2::zeros((0, 384)));
         }
@@ -121,25 +147,35 @@ fn cosine_similarity(a: &Array1<f32>, b: &Array1<f32>, normalise: bool) -> f32 {
     }
 }
 
+fn chunk_input(lines: &[String]) -> Vec<String> {
+    lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .chunks(CHUNK_SIZE)
+        .map(|c| c.join(" "))
+        .collect()
+}
+
 #[allow(unused)]
 fn pairwise_similarity(embeddings: &Array2<f32>, normalise: bool) -> Array2<f32> {
     let n = embeddings.nrows();
     let mut sim = Array2::zeros((n, n));
 
-    let mut normalized = embeddings.clone();
-    if normalise {
+    let normalised = if normalise {
         // Normalise rows to unit length
-        for mut row in normalized.axis_iter_mut(Axis(0)) {
-            let norm = row.mapv(|x| x * x).sum().sqrt();
-            if norm > 0.0 {
-                row.mapv_inplace(|x| x / norm);
-            }
-        }
-    }
-    // Compute dot products
+        //   - Calculate norm_l2 by row -> Array1
+        //   - Rotate to Array2 and multiply embeddings (broadcast division)
+        let norm = embeddings.map_axis(Axis(1), |row| row.mapv(|x| x * x).sum().sqrt());
+        let norm = norm.to_shape((norm.len(), 1)).unwrap(); // Safe as we know sizes
+        &(embeddings / norm + EPSILON).to_owned() // Ass EPSILON to avoid Div0
+    } else {
+        embeddings
+    };
+    // Compute matrix with dot products
     for i in 0..n {
         for j in i..n {
-            let val = normalized.row(i).dot(&normalized.row(j));
+            let val = normalised.row(i).dot(&normalised.row(j));
             sim[[i, j]] = val;
             sim[[j, i]] = val; // Symmetry
         }
