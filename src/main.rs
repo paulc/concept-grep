@@ -30,6 +30,9 @@ struct CliArgs {
     /// threshold
     #[argh(option, default = "default_threshold()")]
     threshold: f32,
+    /// reset context on paragraph (empty line)
+    #[argh(switch)]
+    paragraph: bool,
 }
 
 fn default_context() -> usize {
@@ -65,6 +68,10 @@ fn main() -> anyhow::Result<()> {
     let mut line_num = 1_usize;
 
     while let Some(Ok(line)) = lines.next() {
+        if line.is_empty() && args.paragraph {
+            line_buf.clear();
+        }
+
         // Push line into context buffer
         line_buf.push_back(line.clone());
         if line_buf.len() > args.context {
@@ -276,6 +283,7 @@ fn pairwise_similarity(embeddings: &Array2<f32>, normalise: bool) -> Array2<f32>
     let mut sim = Array2::zeros((n, n));
 
     let normalised = if normalise {
+        // XXX Fix EPSILON handling XXX
         // Normalise rows to unit length
         //   - Calculate norm_l2 by row -> Array1
         //   - Rotate to Array2 and multiply embeddings (broadcast division)
