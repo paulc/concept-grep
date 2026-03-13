@@ -19,20 +19,23 @@ struct CliArgs {
     #[argh(option, short = 'c')]
     concept: String,
     /// model path
-    #[argh(option, default = "String::from(\"models/MiniLM-L6-v2\")")]
+    #[argh(option, short = 'p', default = "String::from(\"models/MiniLM-L6-v2\")")]
     model_path: String,
     /// context lines
-    #[argh(option, default = "default_context()")]
+    #[argh(option, short = 'l', default = "default_context()")]
     context: usize,
     /// get model information
     #[argh(switch)]
     info: bool,
     /// threshold
-    #[argh(option, default = "default_threshold()")]
+    #[argh(option, short = 't', default = "default_threshold()")]
     threshold: f32,
     /// reset context on paragraph (empty line)
     #[argh(switch)]
     paragraph: bool,
+    /// show line number/similarity
+    #[argh(switch, short = 'n')]
+    number: bool,
 }
 
 fn default_context() -> usize {
@@ -60,7 +63,11 @@ fn main() -> anyhow::Result<()> {
     // Get embedding for search concept
     let search_v = model.run(args.concept.as_str())?;
 
-    let mut line_buf = VecDeque::<String>::new();
+    let mut line_buf = VecDeque::<String>::new(); // Context buffer
+                                                  // Line metadata (print flag, line number, similarity)
+                                                  // (Keep this separate from line_buf so that we can use
+                                                  // make_contiguous efficiently)
+    let mut line_meta = VecDeque::<(bool, usize, f32)>::new();
 
     // Read from stdin
     let stdin = std::io::stdin().lock();
@@ -68,14 +75,17 @@ fn main() -> anyhow::Result<()> {
     let mut line_num = 1_usize;
 
     while let Some(Ok(line)) = lines.next() {
+        // Clear conetect buffer on new paragraph if needed
         if line.is_empty() && args.paragraph {
             line_buf.clear();
+            line_meta.clear();
         }
 
-        // Push line into context buffer
+        // Push line into context buffer and pop context if needed
         line_buf.push_back(line.clone());
         if line_buf.len() > args.context {
             line_buf.pop_front();
+            line_meta.pop_front();
         }
 
         // Run model on context
@@ -85,8 +95,21 @@ fn main() -> anyhow::Result<()> {
         // Check similarity (arrays are already normalised from .run())
         let similarity = cosine_similarity(&search_v, &context_v, false);
 
+        // Add line metadata
+        line_meta.push_back((false, line_num, similarity));
+
+        // Check similarity
         if similarity > args.threshold {
-            println!("[{:-4}/{:5.3}] {}", line_num, similarity, line);
+            for (meta, line) in line_meta.iter_mut().zip(line_buf.iter()) {
+                if !(*meta).0 {
+                    (*meta).0 = true;
+                    if args.number {
+                        println!("[{:-4}/{:5.3}] {}", (*meta).1, (*meta).2, line);
+                    } else {
+                        println!("{}", line);
+                    }
+                }
+            }
         }
 
         // let p = ndarray::stack(Axis(0), &[search_v.view(), merged_v.view()])?;
