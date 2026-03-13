@@ -46,6 +46,13 @@ fn default_threshold() -> f32 {
     -1.0
 }
 
+struct Line {
+    line: String,
+    print: bool,
+    number: usize,
+    similarity: f32,
+}
+
 fn main() -> anyhow::Result<()> {
     // Get CLI args
     let args: CliArgs = argh::from_env();
@@ -63,11 +70,8 @@ fn main() -> anyhow::Result<()> {
     // Get embedding for search concept
     let search_v = model.run(args.concept.as_str())?;
 
-    let mut line_buf = VecDeque::<String>::new(); // Context buffer
-                                                  // Line metadata (print flag, line number, similarity)
-                                                  // (Keep this separate from line_buf so that we can use
-                                                  // make_contiguous efficiently)
-    let mut line_meta = VecDeque::<(bool, usize, f32)>::new();
+    // Context buffer
+    let mut line_buf = VecDeque::<Line>::new();
 
     // Read from stdin
     let stdin = std::io::stdin().lock();
@@ -78,42 +82,51 @@ fn main() -> anyhow::Result<()> {
         // Clear conetect buffer on new paragraph if needed
         if line.is_empty() && args.paragraph {
             line_buf.clear();
-            line_meta.clear();
+            // line_meta.clear();
         }
 
-        // Push line into context buffer and pop context if needed
-        line_buf.push_back(line.clone());
+        // Push line into context buffer
+        line_buf.push_back(Line {
+            line,
+            print: false,
+            number: line_num,
+            similarity: 0.0,
+        });
+
+        // Pop old context if needed
         if line_buf.len() > args.context {
             line_buf.pop_front();
-            line_meta.pop_front();
         }
 
         // Run model on context
-        let context = line_buf.make_contiguous().join(" ");
+        let context = line_buf
+            .iter()
+            .map(|l| l.line.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let context_v = model.run(&context)?;
 
-        // Check similarity (arrays are already normalised from .run())
+        // Compute similarity (arrays are already normalised from .run())
         let similarity = cosine_similarity(&search_v, &context_v, false);
 
-        // Add line metadata
-        line_meta.push_back((false, line_num, similarity));
+        // Update Line struct
+        if let Some(ref mut l) = line_buf.back_mut() {
+            l.similarity = similarity;
+        }
 
         // Check similarity
         if similarity > args.threshold {
-            for (meta, line) in line_meta.iter_mut().zip(line_buf.iter()) {
-                if !(*meta).0 {
-                    (*meta).0 = true;
+            for l in line_buf.iter_mut() {
+                if !l.print {
+                    (*l).print = true; // Mark line as printed
                     if args.number {
-                        println!("[{:-4}/{:5.3}] {}", (*meta).1, (*meta).2, line);
+                        println!("[{:-4}/{:5.3}] {}", l.number, l.similarity, l.line);
                     } else {
-                        println!("{}", line);
+                        println!("{}", l.line);
                     }
                 }
             }
         }
-
-        // let p = ndarray::stack(Axis(0), &[search_v.view(), merged_v.view()])?;
-        // print_array2(&pairwise_similarity(&p, true));
 
         line_num += 1;
     }
