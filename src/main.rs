@@ -58,8 +58,10 @@ fn main() -> anyhow::Result<()> {
     let args: CliArgs = argh::from_env();
     let model_path = Path::new(&args.model_path);
 
-    // Set ORT backend API & load model
+    // Set Tract ORT backend API if feature selected
+    #[cfg(feature = "tract")]
     ort::set_api(ort_tract::api());
+
     let mut model = Model::new(model_path)?;
 
     if args.info {
@@ -82,7 +84,6 @@ fn main() -> anyhow::Result<()> {
         // Clear conetect buffer on new paragraph if needed
         if line.is_empty() && args.paragraph {
             line_buf.clear();
-            // line_meta.clear();
         }
 
         // Push line into context buffer
