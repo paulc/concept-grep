@@ -33,6 +33,9 @@ struct CliArgs {
     /// reset context on paragraph (empty line)
     #[argh(switch)]
     paragraph: bool,
+    /// show full paragraph
+    #[argh(switch)]
+    full_paragraph: bool,
     /// show line number/similarity
     #[argh(switch, short = 'n')]
     number: bool,
@@ -79,11 +82,14 @@ fn main() -> anyhow::Result<()> {
     let stdin = std::io::stdin().lock();
     let mut lines = stdin.lines();
     let mut line_num = 1_usize;
+    let mut paragraph_match = false;
 
     while let Some(Ok(line)) = lines.next() {
         // Clear conetect buffer on new paragraph if needed
         if line.is_empty() && args.paragraph {
             line_buf.clear();
+            // Clear paragraph match
+            paragraph_match = false;
         }
 
         // Push line into context buffer
@@ -116,7 +122,8 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Check similarity
-        if similarity > args.threshold {
+        if (similarity > args.threshold) || (args.full_paragraph && paragraph_match) {
+            paragraph_match = true;
             for l in line_buf.iter_mut() {
                 if !l.print {
                     (*l).print = true; // Mark line as printed
